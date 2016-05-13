@@ -43,30 +43,74 @@
 
  */
 
+
+   /*
+   scan should be done in 2 levels:
+
+   step 1: scan each individual block
+   let the last thread of each block to 
+   store its value to a global_array
+   block_sum[blockIdx.x]
+
+   step 2: scan the block_sum array
+
+   step 3: add to every element its block offset
+   found in block_sum array
+   for example output[gid] = input[gid] + block_sum[blockIdx.x]
+
+
+   */
+
 __global__ void simple_scan(const unsigned int * const input,
                             unsigned int * const output,
                             const size_t n)
 {
    __shared__ extern unsigned int data[];
 
-   size_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-   size_t tid = 2*threadIdx.x;
+   size_t gid = blockIdx.x * 2 * blockDim.x + threadIdx.x;
+   size_t tid = 2 * threadIdx.x;
    size_t offset = 1;
 
-   if(tid < n) {
-      data[tid] = input[]
-   }
 
-   data[id] = input[id];
+   data[tid] = (gid < n) ? input[gid] : 0;
+   data[tid+1] = (gid + 1 < n) ? input[gid+1] : 0;
    
-   for (unsigned int s = 1; s < blockDim.x; s*=2) {
+   for (unsigned int d>>1; d > 0; d>>=1) {
       __syncthreads();
-      if(id >= s){
-         data[id] += data[id - s];
+
+      if(threadIdx.x < d){
+         int ai = offset * (tid +1) - 1;
+         int bi = offset * (tid +2) - 1;
+         data[bi] += data[ai];
+      }
+      offset *=2;
+   }
+   
+   if (tid == 0) 
+      data[n -1] = 0;
+
+    
+   for (int d = 1; d < n; d*=2) {
+      offset >>= 1;
+      __syncthreads();
+
+      
+      if(threadIdx.x < d){
+         int ai = offset * (tid +1) - 1;
+         int bi = offset * (tid +2) - 1;
+         unsigned int t = data[ai];
+         data[ai] = data[bi];
+         data[bi] += t;
       }
    }
 
-   output[gid] = data[id];
+   __syncthreads();
+
+   if(gid < n)
+      output[gid] = data[tid];
+    
+    if(gid +1 < n)
+      output[gid+1] = data[tid+1];
 
 }
 
@@ -153,6 +197,29 @@ __global__ void reduce_sum(const unsigned int* const input,
 }
 
 
+//Final step of large-array scan: combine basic inclusive scan with exclusive scan of top elements of input arrays
+__global__ void uniformUpdate(unsigned int *d_Data,
+                              unsigned int *d_Buffer)
+{
+    __shared__ uint buf;
+    uint pos = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (threadIdx.x == 0)
+    {
+        buf = d_Buffer[blockIdx.x];
+    }
+
+    __syncthreads();
+
+    uint data4 = d_Data[pos];
+    data4 += buf;
+    //data4.x += buf;
+    //data4.y += buf;
+    //data4.z += buf;
+    //data4.w += buf;
+    d_Data[pos] = data4;
+}
+
 
 __global__ void flip_array(unsigned int* const input, 
                            const size_t numElems)
@@ -183,15 +250,12 @@ void your_sort(unsigned int*  d_inputVals,
    unsigned int * d_scan0;
    unsigned int * d_scan1;
    unsigned int * d_sum1;
-   //unsigned int * d_sum2;
-
 
    checkCudaErrors(cudaMalloc((void **) &d_predicate,  sizeof(unsigned int) * numElems));
    checkCudaErrors(cudaMalloc((void **) &d_scan0,  sizeof(unsigned int) * numElems));
    checkCudaErrors(cudaMalloc((void **) &d_scan1,  sizeof(unsigned int) * numElems));
    checkCudaErrors(cudaMalloc((void **) &d_sum1,  sizeof(unsigned int) * numElems));
-   //checkCudaErrors(cudaMalloc((void **) &d_sum2,  sizeof(unsigned int) * numElems));
-   //checkCudaErrors(cudaMemset(d_sum2,  0, sizeof(unsigned int) * numElems));
+
    checkCudaErrors(cudaMemset(d_sum1,  0, sizeof(unsigned int) * numElems));
 
    unsigned int sb = 1<<0;   
@@ -217,15 +281,15 @@ void your_sort(unsigned int*  d_inputVals,
       /// End of Serial part
 
       size_t elems = numElems;
-      size_t bytes = threads * sizeof(unsigned int);
+      //size_t bytes = threads * sizeof(unsigned int);
       size_t numBlocks = (elems + 2*threads-1)/(2*threads);
-      reduce_sum<<<numBlocks, threads, bytes>>>(d_predicate, d_sum1, elems);
+      reduce_sum<<<numBlocks, threads, memoryBytes>>>(d_predicate, d_sum1, elems);
       cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
       while(numBlocks > 1){
          elems = numBlocks;
          numBlocks = (elems + 2*threads-1)/(2*threads);
-         reduce_sum<<<numBlocks, threads, bytes>>>(d_sum1, d_sum1, elems);
+         reduce_sum<<<numBlocks, threads, memoryBytes>>>(d_sum1, d_sum1, elems);
          cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
       }
       
