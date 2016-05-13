@@ -45,19 +45,21 @@
 
 __global__ void simple_scan(const unsigned int * const input,
                             unsigned int * const output,
-                            const size_t numElems)
+                            const size_t n)
 {
+   __shared__ extern unsigned int data[];
 
    size_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-   size_t id = threadIdx.x;
+   size_t tid = 2*threadIdx.x;
+   size_t offset = 1;
 
-   if(id > numElems) return;
-   __shared__ extern unsigned int data[];
+   if(tid < n) {
+      data[tid] = input[]
+   }
 
    data[id] = input[id];
    
-   for (unsigned int s = 1; s < blockDim.x; s*=2)
-   {
+   for (unsigned int s = 1; s < blockDim.x; s*=2) {
       __syncthreads();
       if(id >= s){
          data[id] += data[id - s];
@@ -103,38 +105,48 @@ __global__ void change_positions(const unsigned int* const inputVals,
    if(predicate[gid] == 1){
       outputPos[scan0[gid]] = inputPos[gid]; 
       outputVals[scan0[gid]] = inputVals[gid]; 
-   }else{
+   }else if(predicate[gid] == 0){
       //if(scan1[gid] + offset > numElems)
       //   printf("This is bad\n");
       outputPos[scan1[gid] + offset] = inputPos[gid]; 
       outputVals[scan1[gid] + offset] = inputVals[gid];       
+   }else{
+      printf("Ooops\n");
    }
 
 }
 
 // finalize this reduction
 __global__ void reduce_sum(const unsigned int* const input, 
-                           unsigned int * const sum,
+                           unsigned int * sum,
                            const size_t numElems)
 {
+
+
+   __shared__ extern unsigned int data[];
+
    size_t gid = blockIdx.x * 2 * blockDim.x + threadIdx.x;
    size_t id = threadIdx.x;
 
-   if(gid +blockDim.x > numElems) return;
-   __shared__ extern unsigned int data[];
+   //if(gid +blockDim.x > numElems) return;
+   data[id] = gid < numElems ? input[gid] : 0;
+      
+   if(gid + blockDim.x < numElems)
+      data[id] += input[gid + blockDim.x];
 
-   data[id] = input[gid] + input[gid + blockDim.x];
+   __syncthreads();
 
    for (unsigned int s = blockDim.x/2; s > 0; s>>=1){
-      __syncthreads();
-      unsigned int other = id + s;
-      if(id < s && other < numElems){
-         data[id] += data[other];
+      
+      if(id < s){
+         data[id] += data[id + s];
       }
+      __syncthreads();
    }
 
    if (id == 0){
       sum[blockIdx.x] = data[id];
+      //printf("Local Partial sum is %u and global is %u\n",data[id], sum[blockIdx.x]);
    }
 
 
@@ -158,6 +170,12 @@ void your_sort(unsigned int*  d_inputVals,
                const size_t numElems)
 { 
   
+   // Serial Part
+   unsigned int * h_scan0 = new unsigned int[numElems];
+   unsigned int * h_sum = new unsigned int[numElems];
+
+   printf("numElems = %lu\n", numElems);
+
    size_t threads = 1024;
    size_t blocks = (numElems + threads -1) / threads;
 
@@ -165,18 +183,21 @@ void your_sort(unsigned int*  d_inputVals,
    unsigned int * d_scan0;
    unsigned int * d_scan1;
    unsigned int * d_sum1;
-   unsigned int * d_sum2;
+   //unsigned int * d_sum2;
+
 
    checkCudaErrors(cudaMalloc((void **) &d_predicate,  sizeof(unsigned int) * numElems));
    checkCudaErrors(cudaMalloc((void **) &d_scan0,  sizeof(unsigned int) * numElems));
    checkCudaErrors(cudaMalloc((void **) &d_scan1,  sizeof(unsigned int) * numElems));
    checkCudaErrors(cudaMalloc((void **) &d_sum1,  sizeof(unsigned int) * numElems));
-   checkCudaErrors(cudaMalloc((void **) &d_sum2,  sizeof(unsigned int) * numElems));
+   //checkCudaErrors(cudaMalloc((void **) &d_sum2,  sizeof(unsigned int) * numElems));
+   //checkCudaErrors(cudaMemset(d_sum2,  0, sizeof(unsigned int) * numElems));
+   checkCudaErrors(cudaMemset(d_sum1,  0, sizeof(unsigned int) * numElems));
 
    unsigned int sb = 1<<0;   
    size_t memoryBytes = threads * sizeof(unsigned int);
    //for (size_t i = 0; i < 32; ++i){
-   while(sb < (1<<31)){
+   while(/*sb < (1<<31)*/ sb < (1<<1) ){
       apply_predicate<<<blocks, threads>>>(d_inputVals, d_predicate, 
                                           numElems, sb);
       cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
@@ -184,19 +205,36 @@ void your_sort(unsigned int*  d_inputVals,
       simple_scan<<<blocks, threads, memoryBytes>>>(d_predicate, d_scan0, numElems);
       cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-     
-      // This should be working
+      /// Serial Part
+      checkCudaErrors(cudaMemcpy(h_scan0, d_predicate, sizeof(unsigned int) * numElems, cudaMemcpyDeviceToHost));
+      h_sum[0] = 0;
+      for (int i = 0; i < numElems; ++i)
+      {
+         h_sum[0] += h_scan0[i];
+
+      }
+      printf("Host sum = %u\n",h_sum[0]);
+      /// End of Serial part
+
       size_t elems = numElems;
-      checkCudaErrors(cudaMemcpy(d_predicate, d_sum1, sizeof(unsigned int) * numElems, cudaMemcpyDeviceToDevice));
-      do{
-         size_t numBlocks = (elems + threads-1)/threads;
-         size_t bytes = threads * sizeof(unsigned int);
-         reduce_sum<<<numBlocks, threads, bytes>>>(d_sum1, d_sum2, elems);
-         elems = numBlocks;
-         std::swap(d_sum1, d_sum2);
-      }while(elems > 1);
+      size_t bytes = threads * sizeof(unsigned int);
+      size_t numBlocks = (elems + 2*threads-1)/(2*threads);
+      reduce_sum<<<numBlocks, threads, bytes>>>(d_predicate, d_sum1, elems);
       cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-      // @d_sum2[0] should be the final sum
+
+      while(numBlocks > 1){
+         elems = numBlocks;
+         numBlocks = (elems + 2*threads-1)/(2*threads);
+         reduce_sum<<<numBlocks, threads, bytes>>>(d_sum1, d_sum1, elems);
+         cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+      }
+      
+      // @d_sum1[0] should be the final sum
+
+      // Serial Part
+      checkCudaErrors(cudaMemcpy(h_sum, d_sum1, sizeof(unsigned int), cudaMemcpyDeviceToHost));
+      printf("Device sum = %u\n", h_sum[0]);
+      // End of serial part
 
       flip_array<<<blocks, threads>>>(d_predicate, numElems);
       cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
@@ -208,7 +246,7 @@ void your_sort(unsigned int*  d_inputVals,
       change_positions<<<blocks, threads>>>(d_inputVals, d_inputPos,
                                             d_outputVals, d_outputPos,
                                             d_scan0, d_scan1, d_predicate, 
-                                            numElems, d_sum2);
+                                            numElems, d_sum1);
       cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
       std::swap(d_inputPos, d_outputPos);
