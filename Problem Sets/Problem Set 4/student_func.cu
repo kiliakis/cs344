@@ -63,19 +63,25 @@
 
 __global__ void simple_scan(const unsigned int * const input,
                             unsigned int * const output,
+                            unsigned int * const sum,
                             const size_t n)
 {
    __shared__ extern unsigned int data[];
 
-   size_t gid = blockIdx.x * 2 * blockDim.x + threadIdx.x;
+   size_t gid = 2* (blockIdx.x * blockDim.x + threadIdx.x);
    size_t tid = 2 * threadIdx.x;
    size_t offset = 1;
 
 
+   //data[tid] = (gid < n) ? input[gid] : 0;
+   //data[tid+1] = (gid + 1 < n) ? input[gid+1] : 0;
    data[tid] = (gid < n) ? input[gid] : 0;
    data[tid+1] = (gid + 1 < n) ? input[gid+1] : 0;
-   
-   for (unsigned int d>>1; d > 0; d>>=1) {
+
+   if(gid >= n) return;
+
+   // problem here: changed blockDim.x>>2 to blockDim.x
+   for (unsigned int d = blockDim.x; d > 0; d >>=1) {
       __syncthreads();
 
       if(threadIdx.x < d){
@@ -86,11 +92,12 @@ __global__ void simple_scan(const unsigned int * const input,
       offset *=2;
    }
    
+   // problem here
    if (tid == 0) 
-      data[n -1] = 0;
+      data[2*blockDim.x -1] = 0;
 
-    
-   for (int d = 1; d < n; d*=2) {
+   // problem here changed blockDim.x to 2*blockDim.x
+   for (int d = 1; d < 2*blockDim.x; d*=2) {
       offset >>= 1;
       __syncthreads();
 
@@ -103,14 +110,20 @@ __global__ void simple_scan(const unsigned int * const input,
          data[bi] += t;
       }
    }
-
+   
    __syncthreads();
 
-   if(gid < n)
-      output[gid] = data[tid];
+   
+   //if(gid < n)
+   output[gid] = data[tid];
     
-    if(gid +1 < n)
-      output[gid+1] = data[tid+1];
+   //if(gid +1 < n)
+   output[gid+1] = data[tid+1];
+   
+   // Take care with this line
+   if(tid==0)
+      sum[blockIdx.x] = data[2*blockDim.x-1];
+   
 
 }
 
@@ -266,20 +279,38 @@ void your_sort(unsigned int*  d_inputVals,
                                           numElems, sb);
       cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-      simple_scan<<<blocks, threads, memoryBytes>>>(d_predicate, d_scan0, numElems);
+      simple_scan<<<blocks, threads/2, memoryBytes>>>(d_predicate, d_scan0, d_sum1, numElems);
       cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
+      // TODO simple_scan is working for arrays of size k * (threads/2)
+      // check what it needs to be done for different sizes (padding)
+
       /// Serial Part
-      checkCudaErrors(cudaMemcpy(h_scan0, d_predicate, sizeof(unsigned int) * numElems, cudaMemcpyDeviceToHost));
-      h_sum[0] = 0;
-      for (int i = 0; i < numElems; ++i)
-      {
-         h_sum[0] += h_scan0[i];
-
-      }
-      printf("Host sum = %u\n",h_sum[0]);
+      //checkCudaErrors(cudaMemcpy(h_scan0, d_predicate, sizeof(unsigned int) * numElems, cudaMemcpyDeviceToHost));
+      //for (int i = 0; i < 10; ++i) {
+      //   printf("predicate[%d] = %u\n", i, h_scan0[i]);
+      //}
+      //h_scan0[0] = 0;
+      //for (int i = 1; i < 10; ++i) {
+      //   h_scan0[i] += h_scan0[i-1];
+         //if((i-1) % 1024 == 0)
+            //printf("host scan[%d] = %u\n", i-1, h_scan0[i-1]);
+      //}
+      //for (int i = 0; i < 10; ++i) {
+      //   printf("host scan[%d] = %u\n", i, h_scan0[i]);
+      //}
+      //for (int i = 0; i < numElems; ++i) {
+      //   h_scan0[i] = 0;
+      //}
+      //memset(h_scan0, 0, sizeof(unsigned int) * numElems);
+      //checkCudaErrors(cudaMemcpy(h_scan0, d_scan0, sizeof(unsigned int) * numElems, cudaMemcpyDeviceToHost));
+      //for (int i = 0; i < 10; ++i) {
+         //if(i % 1024 == 0)
+      //      printf("Device scan[%d] = %u\n",i, h_scan0[i]);
+      //}
+      //printf("Host sum = %u\n",h_sum[0]);
       /// End of Serial part
-
+      /*
       size_t elems = numElems;
       //size_t bytes = threads * sizeof(unsigned int);
       size_t numBlocks = (elems + 2*threads-1)/(2*threads);
@@ -312,7 +343,7 @@ void your_sort(unsigned int*  d_inputVals,
                                             d_scan0, d_scan1, d_predicate, 
                                             numElems, d_sum1);
       cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
+      */
       std::swap(d_inputPos, d_outputPos);
       std::swap(d_inputVals, d_outputVals);
       sb = sb << 1;
